@@ -1,0 +1,7 @@
+services:
+  leaderboard:
+    build: .
+    env_file: .env.test
+    environment:
+      - ENV=testing
+    restart: unless-stopped
