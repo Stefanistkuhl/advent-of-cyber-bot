@@ -23,10 +23,13 @@ var windowsEndpoint string
 var channelID string
 var authEndpoint string
 var ping string
+var initalPing bool
 
 var logger = log.New(os.Stdout, "[canny] ", log.LstdFlags)
 var email = ""
 var password = ""
+
+const maxDiscordMessageLength = 1900
 
 type leaderboardEntry struct {
 	Username         string    `json:"username"`
@@ -149,6 +152,7 @@ func main() {
 	if ping == "" {
 		logger.Fatal("PING is not set")
 	}
+	initalPing = os.Getenv("INITIALPING") == "true"
 
 	dg, err := discordgo.New("Bot " + token)
 	if err != nil {
@@ -196,7 +200,10 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 		response := formatLeaderboard(leaderboard)
 
-		s.ChannelMessageSend(m.ChannelID, response)
+		_, sendErr := s.ChannelMessageSend(m.ChannelID, response)
+		if sendErr != nil {
+			logger.Println("failed to send message:", sendErr)
+		}
 	}
 
 }
@@ -207,37 +214,67 @@ func formatLeaderboard(leaderboard []leaderboardEntry) string {
 	}
 
 	var result strings.Builder
-	result.WriteString("```\n")
-	result.WriteString(fmt.Sprintf("%-3s %-20s %10s %8s %15s %10s\n", "Rank", "User", "Points", "Subs", "Last Submission", "Diff"))
+	header := fmt.Sprintf("```\n%-3s %-20s %10s %8s %15s %10s %15s\n", "Rank", "User", "Points", "Subs", "Last Submission", "Diff", "Total Diff")
+	result.WriteString(header)
 
 	var fastestTime time.Time
 	if len(leaderboard) > 0 {
 		fastestTime = leaderboard[0].LastSubmission
 	}
 
+	var previousSubmission time.Time
+
+	truncatedCount := 0
+
 	for i, entry := range leaderboard {
 		rank := fmt.Sprintf("%d.", i+1)
 		relativeTime := getRelativeTime(entry.LastSubmission)
 
+		isTimeValid := !entry.LastSubmission.IsZero() && entry.LastSubmission.After(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC))
+
 		var diffStr string
-		if i == 0 {
+		if i == 0 || !isTimeValid || previousSubmission.IsZero() {
 			diffStr = "-"
 		} else {
-			diff := entry.LastSubmission.Sub(fastestTime)
+			diff := entry.LastSubmission.Sub(previousSubmission)
 			diffStr = formatTimeDiff(diff)
 		}
 
-		result.WriteString(fmt.Sprintf("%-3s %-20s %10.1f %8d %15s %10s\n",
+		var totalDiffStr string
+		if i == 0 || !isTimeValid {
+			totalDiffStr = "-"
+		} else {
+			totalDiff := entry.LastSubmission.Sub(fastestTime)
+			totalDiffStr = formatTimeDiff(totalDiff)
+		}
+
+		line := fmt.Sprintf("%-3s %-20s %10.1f %8d %15s %10s %15s\n",
 			rank,
 			truncate(entry.Username, 17),
 			entry.TotalPoints,
 			entry.TotalSubmissions,
 			relativeTime,
 			diffStr,
-		))
+			totalDiffStr,
+		)
+
+		if result.Len()+len(line)+len("```") > maxDiscordMessageLength {
+			truncatedCount = len(leaderboard) - i
+			break
+		}
+
+		result.WriteString(line)
+
+		if isTimeValid {
+			previousSubmission = entry.LastSubmission
+		}
 	}
 
 	result.WriteString("```")
+
+	if truncatedCount > 0 {
+		result.WriteString(fmt.Sprintf("\n... %d more user(s) not displayed due to message length limit.", truncatedCount))
+	}
 
 	return result.String()
 }
@@ -268,21 +305,6 @@ func getRelativeTime(t time.Time) string {
 	return t.Format("Jan 2")
 }
 
-func formatTimeDiff(d time.Duration) string {
-	if d < time.Minute {
-		secs := int(d.Seconds())
-		return fmt.Sprintf("+%ds", secs)
-	} else if d < time.Hour {
-		mins := int(d.Minutes())
-		return fmt.Sprintf("+%dm", mins)
-	} else if d < 24*time.Hour {
-		hours := int(d.Hours())
-		return fmt.Sprintf("+%dh", hours)
-	}
-	days := int(d.Hours() / 24)
-	return fmt.Sprintf("+%dd", days)
-}
-
 func pollWindows(s *discordgo.Session) {
 	var day int
 	token, err := getAuthToken(email, password)
@@ -297,7 +319,13 @@ func pollWindows(s *discordgo.Session) {
 	}
 	data := dat[0]
 	day = data.Day
-	s.ChannelMessageSend(channelID, fmt.Sprintf("%s Day %d: Max submissions: %d, Current submissions: %d", ping, data.Day, data.MaxSubmissions, data.CurrentSubmissions))
+	if initalPing {
+		_, sendInitalErr := s.ChannelMessageSend(channelID, fmt.Sprintf("%s Day %d: Max submissions: %d, Current submissions: %d", ping, data.Day, data.MaxSubmissions, data.CurrentSubmissions))
+		if sendInitalErr != nil {
+			logger.Println("failed to send message:", sendInitalErr)
+		}
+	}
+
 	logger.Println("Day", data.Day, "Max submissions:", data.MaxSubmissions, "Current submissions:", data.CurrentSubmissions)
 	for {
 		time.Sleep(time.Minute)
@@ -308,7 +336,6 @@ func pollWindows(s *discordgo.Session) {
 		}
 		windows, err := getWindows(token)
 		window := windows[0]
-		day = window.Day
 		if err != nil {
 			logger.Println("failed to fetch windows:", err)
 			continue
@@ -316,9 +343,12 @@ func pollWindows(s *discordgo.Session) {
 
 		logger.Println("Day", window.Day, "Max submissions:", window.MaxSubmissions, "Current submissions:", window.CurrentSubmissions)
 		if day != window.Day {
-			s.ChannelMessageSend(channelID, fmt.Sprintf("%s Day %d: Max submissions: %d, Current submissions: %d", ping, window.Day, window.MaxSubmissions, window.CurrentSubmissions))
-			logger.Println("Day", window.Day, "Max submissions:", window.MaxSubmissions, "Current submissions:", window.CurrentSubmissions)
 			day = window.Day
+			_, sendErr := s.ChannelMessageSend(channelID, fmt.Sprintf("%s Day %d: Max submissions: %d, Current submissions: %d", ping, day, window.MaxSubmissions, window.CurrentSubmissions))
+			if sendErr != nil {
+				logger.Println("failed to send message:", sendErr)
+			}
+			logger.Println("Day", window.Day, "Max submissions:", window.MaxSubmissions, "Current submissions:", window.CurrentSubmissions)
 			continue
 		}
 	}
@@ -352,4 +382,42 @@ func getWindows(token string) ([]windowResponse, error) {
 	}
 
 	return windows, nil
+}
+
+func formatTimeDiff(d time.Duration) string {
+	if d < 0 {
+		d = -d
+	}
+
+	days := int(d.Hours() / 24)
+	d -= time.Duration(days) * 24 * time.Hour
+
+	hours := int(d.Hours())
+	d -= time.Duration(hours) * time.Hour
+
+	mins := int(d.Minutes())
+	d -= time.Duration(mins) * time.Minute
+
+	secs := int(d.Seconds())
+
+	parts := []string{}
+
+	if days > 0 {
+		parts = append(parts, fmt.Sprintf("%dd", days))
+	}
+	if hours > 0 {
+		parts = append(parts, fmt.Sprintf("%dh", hours))
+	}
+	if mins > 0 {
+		parts = append(parts, fmt.Sprintf("%dm", mins))
+	}
+	if secs > 0 && len(parts) == 0 {
+		parts = append(parts, fmt.Sprintf("%ds", secs))
+	}
+
+	if len(parts) == 0 {
+		return "+0s"
+	}
+
+	return "+" + strings.Join(parts, " ")
 }

@@ -1,7 +1,7 @@
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
 
-state = {"day": 3, "submissions": 0}
+state = {"day": 5, "submissions": 0}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -55,4 +55,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    print(state)
     HTTPServer(("localhost", 5000), Handler).serve_forever()
