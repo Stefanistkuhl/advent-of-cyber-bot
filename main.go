@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/fogleman/gg"
 	"github.com/joho/godotenv"
 )
 
@@ -29,7 +30,19 @@ var logger = log.New(os.Stdout, "[canny] ", log.LstdFlags)
 var email = ""
 var password = ""
 
-const maxDiscordMessageLength = 1900
+const (
+	fontSize      = 24.0
+	rowHeight     = 40.0
+	headerHeight  = 60.0
+	imageWidth    = 1200
+	rankColX      = 20.0
+	userColX      = 100.0
+	pointsColX    = 400.0
+	subsColX      = 550.0
+	lastSubColX   = 700.0
+	diffColX      = 900.0
+	totalDiffColX = 1050.0
+)
 
 type leaderboardEntry struct {
 	Username         string    `json:"username"`
@@ -198,92 +211,9 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 			return
 		}
 
-		response := formatLeaderboard(leaderboard)
-
-		_, sendErr := s.ChannelMessageSend(m.ChannelID, response)
-		if sendErr != nil {
-			logger.Println("failed to send message:", sendErr)
-		}
+		SendLeaderboardImage(s, m.ChannelID, leaderboard)
 	}
 
-}
-
-func formatLeaderboard(leaderboard []leaderboardEntry) string {
-	if len(leaderboard) == 0 {
-		return "No leaderboard data available."
-	}
-
-	var result strings.Builder
-	header := fmt.Sprintf("```\n%-3s %-20s %10s %8s %15s %10s %15s\n", "Rank", "User", "Points", "Subs", "Last Submission", "Diff", "Total Diff")
-	result.WriteString(header)
-
-	var fastestTime time.Time
-	if len(leaderboard) > 0 {
-		fastestTime = leaderboard[0].LastSubmission
-	}
-
-	var previousSubmission time.Time
-
-	truncatedCount := 0
-
-	for i, entry := range leaderboard {
-		rank := fmt.Sprintf("%d.", i+1)
-		relativeTime := getRelativeTime(entry.LastSubmission)
-
-		isTimeValid := !entry.LastSubmission.IsZero() && entry.LastSubmission.After(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC))
-
-		var diffStr string
-		if i == 0 || !isTimeValid || previousSubmission.IsZero() {
-			diffStr = "-"
-		} else {
-			diff := entry.LastSubmission.Sub(previousSubmission)
-			diffStr = formatTimeDiff(diff)
-		}
-
-		var totalDiffStr string
-		if i == 0 || !isTimeValid {
-			totalDiffStr = "-"
-		} else {
-			totalDiff := entry.LastSubmission.Sub(fastestTime)
-			totalDiffStr = formatTimeDiff(totalDiff)
-		}
-
-		line := fmt.Sprintf("%-3s %-20s %10.1f %8d %15s %10s %15s\n",
-			rank,
-			truncate(entry.Username, 17),
-			entry.TotalPoints,
-			entry.TotalSubmissions,
-			relativeTime,
-			diffStr,
-			totalDiffStr,
-		)
-
-		if result.Len()+len(line)+len("```") > maxDiscordMessageLength {
-			truncatedCount = len(leaderboard) - i
-			break
-		}
-
-		result.WriteString(line)
-
-		if isTimeValid {
-			previousSubmission = entry.LastSubmission
-		}
-	}
-
-	result.WriteString("```")
-
-	if truncatedCount > 0 {
-		result.WriteString(fmt.Sprintf("\n... %d more user(s) not displayed due to message length limit.", truncatedCount))
-	}
-
-	return result.String()
-}
-
-func truncate(s string, maxLen int) string {
-	if len(s) > maxLen {
-		return s[:maxLen-3] + "..."
-	}
-	return s
 }
 
 func getRelativeTime(t time.Time) string {
@@ -420,4 +350,105 @@ func formatTimeDiff(d time.Duration) string {
 	}
 
 	return "+" + strings.Join(parts, " ")
+}
+
+func SendLeaderboardImage(s *discordgo.Session, channelID string, leaderboard []leaderboardEntry) {
+	if len(leaderboard) == 0 {
+		s.ChannelMessageSend(channelID, "No leaderboard data available.")
+		return
+	}
+
+	height := int(headerHeight + (float64(len(leaderboard)) * rowHeight) + 20)
+
+	dc := gg.NewContext(imageWidth, height)
+
+	dc.SetHexColor("#2f3136")
+	dc.Clear()
+
+	err := dc.LoadFontFace("Roboto-Regular.ttf", fontSize)
+	if err != nil {
+		logger.Println("Could not load custom font, using default:", err)
+	}
+
+	dc.SetRGB(1, 1, 1)
+	dc.DrawStringAnchored("Rank", rankColX, headerHeight/2, 0, 0.5)
+	dc.DrawStringAnchored("User", userColX, headerHeight/2, 0, 0.5)
+	dc.DrawStringAnchored("Points", pointsColX, headerHeight/2, 0.5, 0.5)
+	dc.DrawStringAnchored("Subs", subsColX, headerHeight/2, 0.5, 0.5)
+	dc.DrawStringAnchored("Last Submission", lastSubColX, headerHeight/2, 0, 0.5)
+	dc.DrawStringAnchored("Diff", diffColX, headerHeight/2, 0, 0.5)
+	dc.DrawStringAnchored("Total Diff", totalDiffColX, headerHeight/2, 0, 0.5)
+
+	dc.SetHexColor("#72767d")
+	dc.DrawLine(20, headerHeight-10, float64(imageWidth)-20, headerHeight-10)
+	dc.Stroke()
+
+	var fastestTime time.Time
+	if len(leaderboard) > 0 {
+		fastestTime = leaderboard[0].LastSubmission
+	}
+	var previousSubmission time.Time
+
+	for i, entry := range leaderboard {
+		y := headerHeight + (float64(i) * rowHeight) + (rowHeight / 2)
+
+		if i%2 == 1 {
+			dc.SetHexColor("#36393f")
+			dc.DrawRectangle(0, headerHeight+(float64(i)*rowHeight), float64(imageWidth), rowHeight)
+			dc.Fill()
+		}
+
+		dc.SetRGB(0.9, 0.9, 0.9)
+
+		rank := fmt.Sprintf("%d.", i+1)
+		dc.DrawStringAnchored(rank, rankColX, y, 0, 0.5)
+
+		username := entry.Username
+		if len(username) > 20 {
+			username = username[:17] + "..."
+		}
+		dc.DrawStringAnchored(username, userColX, y, 0, 0.5)
+
+		dc.DrawStringAnchored(fmt.Sprintf("%.1f", entry.TotalPoints), pointsColX, y, 0.5, 0.5)
+
+		dc.DrawStringAnchored(fmt.Sprintf("%d", entry.TotalSubmissions), subsColX, y, 0.5, 0.5)
+
+		relativeTime := getRelativeTime(entry.LastSubmission)
+		dc.DrawStringAnchored(relativeTime, lastSubColX, y, 0, 0.5)
+
+		isTimeValid := !entry.LastSubmission.IsZero() && entry.LastSubmission.After(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC))
+
+		var diffStr string
+		if i == 0 || !isTimeValid || previousSubmission.IsZero() {
+			diffStr = "-"
+		} else {
+			diff := entry.LastSubmission.Sub(previousSubmission)
+			diffStr = formatTimeDiff(diff)
+		}
+
+		var totalDiffStr string
+		if i == 0 || !isTimeValid {
+			totalDiffStr = "-"
+		} else {
+			totalDiff := entry.LastSubmission.Sub(fastestTime)
+			totalDiffStr = formatTimeDiff(totalDiff)
+		}
+
+		dc.DrawStringAnchored(diffStr, diffColX, y, 0, 0.5)
+
+		dc.DrawStringAnchored(totalDiffStr, totalDiffColX, y, 0, 0.5)
+
+		if isTimeValid {
+			previousSubmission = entry.LastSubmission
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := dc.EncodePNG(&buf); err != nil {
+		logger.Println("Failed to encode PNG:", err)
+		s.ChannelMessageSend(channelID, "Failed to generate leaderboard image.")
+		return
+	}
+
+	s.ChannelFileSend(channelID, "leaderboard.png", &buf)
 }
